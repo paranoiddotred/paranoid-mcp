@@ -1,0 +1,16 @@
+{
+  "name": "paranoid-mcp",
+  "version": "1.1.0",
+  "description": "Ask AI models in private from Claude Code, Cursor or any MCP client, with a zero-knowledge proof per question",
+  "type": "module",
+  "main": "connect.mjs",
+  "scripts": {
+    "start": "node connect.mjs mcp"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["mcp", "privacy", "zero-knowledge", "solana", "x402", "ai"],
+  "homepage": "https://paranoid.red",
+  "license": "MIT"
+}

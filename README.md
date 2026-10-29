@@ -1,0 +1,71 @@
+# PARANOID MCP
+
+Ask AI models in private from Claude Code, Cursor or any MCP client. Every question carries a fresh zero-knowledge proof made on your own computer, so the PARANOID gateway can check that it was paid for without learning who asked or tying it to any other question.
+
+[PARANOID](https://paranoid.red) runs open models such as DeepSeek, Kimi, Qwen and GLM, including uncensored ones. Questions are bought once with USDC on Solana, and agents can buy them on their own with [x402](https://github.com/coinbase/x402). The Solana program and the circuit behind every proof are open at [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), and that source builds to the exact bytes deployed on mainnet.
+
+## Install
+
+It is one file with no dependencies and needs Node.js 20 or newer.
+
+```bash
+mkdir -p ~/paranoid && curl -o ~/paranoid/connect.mjs https://paranoid.red/connect.mjs
+```
+
+**Claude Code**
+
+```bash
+claude mcp add paranoid -e PARANOID_PAYER=$HOME/agent-wallet.json -- node $HOME/paranoid/connect.mjs mcp
+```
+
+**Cursor** (`~/.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "paranoid": {
+      "command": "node",
+      "args": ["/Users/you/paranoid/connect.mjs", "mcp"],
+      "env": { "PARANOID_PAYER": "/Users/you/agent-wallet.json" }
+    }
+  }
+}
+```
+
+`PARANOID_PAYER` points at a Solana keypair file (the JSON the Solana CLI writes) whose wallet holds USDC. It is needed only to buy questions. If you already have questions on [paranoid.red](https://paranoid.red/app), run `node connect.mjs` once and paste the connector code from the Keys tab instead.
+
+## Tools
+
+| Tool | What it does |
+| --- | --- |
+| `ask` | Asks a model a question with a fresh key and returns the answer. Takes `question`, and `model` and `system` if you want them. |
+| `models` | Lists the models and how many questions one message to each costs. |
+| `balance` | Says how many questions are left and the last day they can be used. |
+| `buy` | Buys a new membership with x402 from the wallet in `PARANOID_PAYER`. |
+
+Questions cost 0.002 USDC each, 250 at least, plus a 0.30 USDC setup fee when an agent buys with x402. The gateway pays the Solana network fees.
+
+## How it stays private
+
+When you buy questions, your computer makes a secret and sends only a commitment to it, which goes into a member list on Solana. For each question, the connector proves in zero knowledge that it holds the secret of some member with questions left, and marks one numbered question as spent with a nullifier that names no member. The gateway verifies the proof and forwards the question to the model, but it never learns which member asked, and two questions cannot be tied together. Spending the same numbered question twice reveals the secret, and anyone can then slash that membership.
+
+The design follows [zkAPI](https://github.com/vbuterin/zkapi) by Vitalik Buterin and Davide Crapis, from the Ethereum Foundation and the Open Anonymity Project. PARANOID brings it to Solana.
+
+## Other ways to run it
+
+The same file serves the OpenAI API on your computer for any app that speaks it.
+
+```bash
+node connect.mjs                 # serves http://127.0.0.1:4141/v1, any API key works
+PARANOID_PAYER=wallet.json node connect.mjs buy 500
+```
+
+Full documentation is at [paranoid.red/docs/agents](https://paranoid.red/docs/agents) and [paranoid.red/docs/connector](https://paranoid.red/docs/connector).
+
+## Files it downloads
+
+On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. Their SHA-256 hashes are written inside `connect.mjs`, and it refuses to run anything that does not match.
+
+## License
+
+MIT

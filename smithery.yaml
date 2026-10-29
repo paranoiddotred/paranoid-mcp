@@ -1,0 +1,14 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      payerPath:
+        type: string
+        description: Path to a Solana keypair file whose wallet pays USDC when the buy tool is used. Optional.
+  commandFunction: |-
+    (config) => ({
+      command: 'node',
+      args: ['connect.mjs', 'mcp'],
+      env: config.payerPath ? { PARANOID_PAYER: config.payerPath } : {}
+    })
