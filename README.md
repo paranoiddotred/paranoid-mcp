@@ -14,10 +14,18 @@ mkdir -p ~/paranoid && curl -o ~/paranoid/connect.mjs https://paranoid.red/conne
 
 The file paranoid.red serves is byte for byte the `connect.mjs` in this repository. Each
 [release](https://github.com/paranoiddotred/paranoid-mcp/releases) lists its SHA-256, so you can check the copy
-you downloaded before you run it:
+you downloaded before you run it. For the current release:
 
 ```bash
-shasum -a 256 ~/paranoid/connect.mjs
+echo "ed49f60f77e3a6561b31826b1712489a83924e4666fd94c3c2fefa35365581e3  $HOME/paranoid/connect.mjs" | shasum -a 256 -c
+```
+
+You can also build it yourself from `src/` and the prover and circuit files where they are published (snarkjs
+0.7.6 on npm, the circuit in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid)). CI does the
+same on every push and fails if a single byte differs.
+
+```bash
+bash scripts/fetch-zk.sh && node build.mjs && git diff --exit-code connect.mjs
 ```
 
 **Claude Code**
@@ -118,7 +126,7 @@ Full documentation is at [paranoid.red/docs/agents](https://paranoid.red/docs/ag
 
 ## Files it downloads
 
-On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. The prover is snarkjs 0.7.6 exactly as published on npm, and the circuit files are the ones published in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), so anyone can compare them. Their SHA-256 hashes are written inside `connect.mjs`, it refuses to run anything that does not match, and the prover runs in a separate JavaScript realm with no network, files or process to reach, so the secret it is given cannot leave. [SECURITY.md](SECURITY.md) has the details.
+On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. The prover is snarkjs 0.7.6 exactly as published on npm, and the circuit files are the ones published in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), so anyone can compare them. Their SHA-256 hashes are written inside `connect.mjs`, it refuses to run anything that does not match, and the prover runs in a separate JavaScript realm with no network, files or process to reach, so the proof is the only thing that leaves it. [SECURITY.md](SECURITY.md) has the details.
 
 ## License
 

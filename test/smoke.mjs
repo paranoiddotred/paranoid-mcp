@@ -63,3 +63,12 @@ try {
 } finally {
   proxy.child.kill();
 }
+
+// A proxy that fetch would ignore stops the connector instead of letting requests leave from this address.
+const ignored = spawn(process.execPath, [CONNECTOR, "mcp"], { env: { ...process.env, PARANOID_HOME: home, HTTPS_PROXY: "http://127.0.0.1:9", NODE_USE_ENV_PROXY: "" } });
+let said = "";
+ignored.stderr.on("data", (chunk) => { said += chunk; });
+const code = await new Promise((resolve) => ignored.on("exit", resolve));
+assert.equal(code, 1);
+assert.match(said, /would not go through it/);
+console.log("ok: a proxy that would be ignored stops the connector");

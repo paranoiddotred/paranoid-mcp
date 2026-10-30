@@ -1,6 +1,6 @@
 {
   "name": "paranoid-mcp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Ask AI models in private from Claude Code, Cursor or any MCP client, with a zero-knowledge proof per question",
   "type": "module",
   "main": "connect.mjs",

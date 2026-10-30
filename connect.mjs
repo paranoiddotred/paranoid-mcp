@@ -24,7 +24,7 @@
 import http from "node:http";
 import vm from "node:vm";
 import { createHash, createPrivateKey, randomFillSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -40,6 +40,21 @@ const STATE = join(HOME, "connector.json");
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GATEWAY = process.env.PARANOID_GATEWAY ?? "E9UMSt9mEQoUcoW8ACqaRTPPwyK9KkuD3XBFp8U2V5iX";
 const SETUP_USDC = 300_000n;
+
+// A proxy you set must actually carry the traffic. fetch follows HTTPS_PROXY only on Node.js 22.21, 24 or newer
+// and only with NODE_USE_ENV_PROXY=1; anywhere else it would go straight out from your own address, so stop.
+{
+  const env = (n) => process.env[n] ?? process.env[n.toLowerCase()];
+  if (env("HTTPS_PROXY") || env("HTTP_PROXY") || env("ALL_PROXY")) {
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    const honoured = (major === 22 && minor >= 21) || major >= 24;
+    const on = process.env.NODE_USE_ENV_PROXY === "1" || process.execArgv.includes("--use-env-proxy");
+    if (!env("HTTPS_PROXY") || !honoured || !on) {
+      console.error("A proxy is set, but this connector's requests would not go through it. Set HTTPS_PROXY (an HTTP proxy, such as Tor's HTTPTunnelPort) and NODE_USE_ENV_PROXY=1, on Node.js 22.21, 24 or newer.");
+      process.exit(1);
+    }
+  }
+}
 // The prover and the circuit the gateway verifies against. Downloads must match these before anything runs.
 const ZK = {
   "snarkjs.min.js": "3f61bbd9ac0a10173902eaef65b510fa4e9a2c057f759c7f18a6d0446b20fd06",
@@ -173,13 +188,14 @@ async function chain(fresh = false) {
 }
 const epochAt = (cfg, t) => Math.max(0, Math.floor((t - cfg.genesis) / cfg.epochSeconds));
 
-/** One past the last question of this secret the gateway has seen, scanning on from `from` (256 unseen in a row ends it). */
+/** One past the last question of this secret the gateway has seen at or after `from` (256 unseen in a row ends
+ *  it), or `from` itself. Numbers below `from` are already behind this counter, so they are not hashed again. */
 async function seenNext(secret, questions, from) {
   const res = await fetch(`${SITE}/api/v1/used`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Could not read the list of used questions (${res.status}).`);
   const used = new Set((await res.text()).split("\n").filter(Boolean));
-  let next = 0;
-  for (let i = 0, gap = 0; i < questions && (gap < 256 || i < from); i++) {
+  let next = from;
+  for (let i = from, gap = 0; i < questions && gap < 256; i++) {
     if (used.has(ticketNullifier(secret, i).toString(16))) { next = i + 1; gap = 0; } else gap++;
   }
   return next;
@@ -203,7 +219,8 @@ async function zkFile(name) {
 // The prover runs in a context of its own realm (DONT_CONTEXTIFY) that holds no object from this one: no fetch,
 // no process, no file access, nothing whose constructor leads back here. The few browser functions snarkjs
 // looks for are written inside it, randomness and the circuit files go in as bytes copied into arrays it made,
-// and the proof comes out as a string. So even a prover that misbehaved could not send the secret anywhere.
+// and the proof comes out as a string. It cannot open a connection, a file or a process of its own, so the proof
+// is the only thing that leaves it, and the prover itself is pinned to the published snarkjs 0.7.6 bytes.
 const SANDBOX = `
 globalThis.btoa = (s) => { const c = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let o = "";
   for (let i = 0; i < s.length; i += 3) { const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), d = s.charCodeAt(i + 2);
@@ -239,11 +256,13 @@ function prover() {
 function load() {
   if (!existsSync(STATE)) return null;
   const j = JSON.parse(readFileSync(STATE, "utf8"));
-  return { secret: BigInt(j.secret), next: Number(j.next) };
+  const p = j.pending;
+  return { secret: BigInt(j.secret), next: Number(j.next), pending: p ? { start: Number(p.start), cost: Number(p.cost), x: BigInt(p.x) } : null };
 }
 function save(s) {
   mkdirSync(HOME, { recursive: true, mode: 0o700 });
-  writeFileSync(STATE, JSON.stringify({ secret: s.secret.toString(), next: s.next }), { mode: 0o600 });
+  const pending = s.pending ? { start: s.pending.start, cost: s.pending.cost, x: s.pending.x.toString() } : undefined;
+  writeFileSync(STATE, JSON.stringify({ secret: s.secret.toString(), next: s.next, pending }), { mode: 0o600 });
   chmodSync(STATE, 0o600);
 }
 function parseCode(text) {
@@ -357,6 +376,14 @@ async function buy(questions) {
   console.log(`Bought ${body.questions} questions. Payment ${body.payment}`);
   state = { secret, next: 0 };
   cache = null;
+  if (kept) {
+    // The membership that was here stays on disk only while it still has questions.
+    const old = JSON.parse(readFileSync(kept, "utf8"));
+    const me = (await chain(true)).members.find((m) => m.commitment === commitmentOf(BigInt(old.secret)));
+    const left = me && me.status === "active" ? me.questions - (await seenNext(BigInt(old.secret), me.questions, Number(old.next))) : 0;
+    if (left > 0) console.log(`The membership that was here still has ${left} questions. Its code is kept in ${kept}.`);
+    else unlinkSync(kept);
+  }
   return body;
 }
 
@@ -369,10 +396,11 @@ async function costOf(model) {
     models = { at: Date.now(), list: j.data.map((m) => ({ id: m.id, cost: m.cost ?? 1 })) };
   }
   // The gateway sends an unknown model name to the default model, which is listed first.
-  return (models.list.find((m) => m.id === model) ?? models.list[0]).cost;
+  return (models.list.find((m) => m.id === model) ?? models.list[0])?.cost ?? 1;
 }
 
 let state, warned = false;
+const sending = new Set(); // starts of keys on their way to the gateway right now
 /** A key for `cost` questions. With `again` (a refused key's numbers and x) it proves the same numbers with the
  *  same x: y = secret + a1 * x does not depend on the member list, so resending gives the gateway the very same
  *  points and nothing new, and a refusal never costs questions. */
@@ -383,6 +411,12 @@ async function freshKey(cost, fresh = false, again = null) {
   if (me.status !== "active") throw new Error("This membership is not active (it was slashed).");
   const epoch = epochAt(cfg, await chainNow());
   if (epoch > me.endEpoch) throw new Error("This membership's questions have expired. Top up on the site.");
+  // A key the gateway never answered (a network error or a 5xx) still holds its numbers: prove them again with
+  // the same x, which shows the gateway nothing it has not seen, instead of letting them go to waste.
+  if (!again && state.pending && !sending.has(state.pending.start)) {
+    if (state.pending.cost === cost) again = state.pending;
+    else { state.pending = null; save(state); }
+  }
   let start, x;
   if (again) ({ start, x } = again);
   else {
@@ -397,8 +431,9 @@ async function freshKey(cost, fresh = false, again = null) {
     // Reserve and write the counter before any proof exists: a question is never offered twice.
     start = state.next;
     state.next += cost;
-    save(state);
     x = randomField();
+    state.pending = { start, cost, x };
+    save(state);
   }
   const spends = [];
   try {
@@ -409,11 +444,11 @@ async function freshKey(cost, fresh = false, again = null) {
     }
   } catch (e) {
     // Nothing left this computer, so the numbers are still unspent: give them back.
-    if (!again && state.next === start + cost) { state.next = start; save(state); }
+    if (!again && state.next === start + cost) { state.next = start; state.pending = null; save(state); }
     throw e;
   }
   if (process.env.PARANOID_DEBUG) console.log(`key x=${x.toString(16).slice(0, 10)} questions ${start}..${start + cost - 1}`);
-  return { key: packKey(spends), start, x };
+  return { key: packKey(spends), start, x, reused: !!again };
 }
 
 // ---- the local endpoint
@@ -436,14 +471,27 @@ async function relay(res, upstream) {
 /** Sends one chat request to the gateway with a fresh key for the model's price. */
 async function forward(body, model) {
   const cost = await costOf(model);
-  const send = (key) => fetch(`${SITE}/api/v1/chat/completions`, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Bearer ${key}` } });
+  const send = async (k) => {
+    sending.add(k.start);
+    try { return await fetch(`${SITE}/api/v1/chat/completions`, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Bearer ${k.key}` } }); }
+    finally { sending.delete(k.start); }
+  };
   const t = Date.now();
-  const k = await freshKey(cost);
-  let up = await send(k.key);
+  let k = await freshKey(cost);
+  let up = await send(k);
   if (up.status === 401 && (await up.clone().text()).includes("stale_member_list")) {
     // Someone joined or left since our read. Those questions were refused before use: prove the same ones again.
-    up = await send((await freshKey(cost, true, k)).key);
+    up = await send(await freshKey(cost, true, k));
   }
+  if (k.reused && up.status === 402) {
+    // The key that looked unanswered had been answered after all: its numbers are spent, so take new ones.
+    state.pending = null;
+    save(state);
+    k = await freshKey(cost);
+    up = await send(k);
+  }
+  // Answered, or refused for good: the numbers are settled. Only a 5xx keeps them for the next request.
+  if (up.status < 500 && state.pending?.start === k.start) { state.pending = null; save(state); }
   console.log(`${new Date().toISOString().slice(11, 19)} ${String(model ?? "default")}: ${cost} question${cost === 1 ? "" : "s"}, ${up.status} in ${Date.now() - t} ms`);
   return up;
 }
@@ -493,7 +541,7 @@ const TOOLS = [
   { name: "balance", description: "How many questions this membership has left and the last day they can be used.", inputSchema: { type: "object", properties: {} } },
   {
     name: "buy",
-    description: "Buy a new membership with an x402 payment in USDC on Solana from the wallet in PARANOID_PAYER: 0.002 USDC a question plus a 0.30 USDC setup fee, 250 questions at least. A membership already here is kept in a file beside the new one.",
+    description: "Buy a new membership with an x402 payment in USDC on Solana from the wallet in PARANOID_PAYER: 0.002 USDC a question plus a 0.30 USDC setup fee, 250 questions at least. A membership already here that still has questions is kept in a file beside the new one.",
     inputSchema: { type: "object", properties: { questions: { type: "integer", minimum: 250, description: "How many questions to buy." } }, required: ["questions"] },
   },
 ];
@@ -569,6 +617,8 @@ if (arg === "mcp") {
     }
     if (arg) {
       const code = parseCode(arg);
+      // A different membership that was here is kept beside the new one, never overwritten.
+      if (had && had.secret !== code.secret) renameSync(STATE, `${STATE}.${Date.now()}`);
       state = had && had.secret === code.secret ? { secret: code.secret, next: Math.max(had.next, code.next) } : code;
       save(state);
     } else if (had) state = had;
