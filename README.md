@@ -59,6 +59,52 @@ When you buy questions, your computer makes a secret and sends only a commitment
 
 The design follows [zkAPI](https://github.com/vbuterin/zkapi) by Vitalik Buterin and Davide Crapis, from the Ethereum Foundation and the Open Anonymity Project. PARANOID brings it to Solana.
 
+## Use a PARANOID key in any OpenAI app
+
+The Keys tab on [paranoid.red](https://paranoid.red/app) gives a key that starts with `sk-paranoid-`. It works like an OpenAI API key, so any app or SDK that lets you set the OpenAI base URL can run on PARANOID with two settings.
+
+```text
+Base URL  https://paranoid.red/api/v1
+API key   sk-paranoid-...
+```
+
+With the OpenAI SDK for Node.js:
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "https://paranoid.red/api/v1", apiKey: process.env.PARANOID_KEY });
+const res = await client.chat.completions.create({
+  model: "default",
+  messages: [{ role: "user", content: "Explain zero-knowledge proofs in two lines." }],
+});
+console.log(res.choices[0].message.content);
+```
+
+With the OpenAI SDK for Python:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(base_url="https://paranoid.red/api/v1", api_key=os.environ["PARANOID_KEY"])
+res = client.chat.completions.create(model="default", messages=[{"role": "user", "content": "Hello"}])
+print(res.choices[0].message.content)
+```
+
+With curl:
+
+```bash
+curl https://paranoid.red/api/v1/chat/completions \
+  -H "Authorization: Bearer $PARANOID_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"default","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+`GET https://paranoid.red/api/v1/models` lists the models and what one message to each costs. A model name the gateway does not know goes to the default model, so apps that insist on a name of their own still work.
+
+The key is a bundle of proofs made on your device and stops working when the day ends. For an app or agent that stays on, run the connector instead: it makes a fresh key for every request, so nothing ever expires.
+
 ## Other ways to run it
 
 The same file serves the OpenAI API on your computer for any app that speaks it.
