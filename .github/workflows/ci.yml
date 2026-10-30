@@ -17,7 +17,19 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: node --check connect.mjs
+      - run: node --check bin.mjs
       - run: node test/smoke.mjs
+      - run: node test/bin.mjs
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bash scripts/pack-mcpb.sh
+      - run: cmp connect.mjs build/mcpb/server/connect.mjs && cmp bin.mjs build/mcpb/server/bin.mjs
 
   reproduce:
     runs-on: ubuntu-latest
