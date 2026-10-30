@@ -5,7 +5,7 @@ Thank you for looking. Bug reports, fixes and reports of how it behaves in your 
 ## Before you open a pull request
 
 1. `connect.mjs` must stay one file with no dependencies that runs on Node.js 20 or newer. Check it with
-   `node --check connect.mjs`.
+   `node --check connect.mjs` and run `node test/smoke.mjs`, which CI also runs on Node.js 20, 22 and 24.
 2. Try the change in a real client. `claude mcp add paranoid -- node $PWD/connect.mjs mcp` adds it to Claude
    Code; the four tools (ask, models, balance, buy) should list and answer.
 3. Keep one change per pull request, and write commit messages as
