@@ -1,5 +1,5 @@
 // PARANOID connector: keeps any OpenAI-compatible app connected to PARANOID, with a fresh anonymous key for
-// every request. One file, no packages: Node 20 or newer.
+// every request. One file, no packages: Node.js 20.18, 22.8 or newer.
 //
 //   curl -O https://paranoid.red/connect.mjs
 //   node connect.mjs          the first run asks for the code from the Keys tab and saves it to ~/.paranoid (owner-only)
@@ -11,7 +11,9 @@
 // Then point Zed, your app, an agent or curl at http://127.0.0.1:4141/v1. Any API key string works. For each chat
 // request the connector proves the model's price in questions from your membership, here on your computer, with
 // a new random key, and forwards it to the gateway. Keys never outlive one request, so the day change never breaks
-// your app and no two requests share anything that could tie them together.
+// your app and no two keys share anything that could tie them together. The requests still leave from your own
+// network address; to keep that apart from them too, send them through Tor or a VPN (HTTPS_PROXY with
+// NODE_USE_ENV_PROXY=1 on Node.js 22.21, 24 or newer).
 //
 // One membership, one place: after moving your code here, the site forgets it in that browser. Spending the same
 // question twice gives the secret away and the membership is slashed, so the connector also reads the public list
@@ -21,7 +23,7 @@
 
 import http from "node:http";
 import vm from "node:vm";
-import { createHash, createPrivateKey, sign } from "node:crypto";
+import { createHash, createPrivateKey, randomFillSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +36,10 @@ const CONFIG = process.env.PARANOID_CONFIG ?? "EevCQ789SrwghbBHQjVonGFgxNExeqtAc
 const PORT = Number(process.env.PARANOID_PORT ?? 4141);
 const HOME = process.env.PARANOID_HOME ?? join(homedir(), ".paranoid");
 const STATE = join(HOME, "connector.json");
+// What `buy` agrees to pay: USDC, to this gateway wallet, at most the program's price plus this setup fee.
+const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const GATEWAY = process.env.PARANOID_GATEWAY ?? "E9UMSt9mEQoUcoW8ACqaRTPPwyK9KkuD3XBFp8U2V5iX";
+const SETUP_USDC = 300_000n;
 // The prover and the circuit the gateway verifies against. Downloads must match these before anything runs.
 const ZK = {
   "snarkjs.min.js": "3f61bbd9ac0a10173902eaef65b510fa4e9a2c057f759c7f18a6d0446b20fd06",
@@ -156,7 +162,7 @@ async function chain(fresh = false) {
   if (!acc?.value) throw new Error("PARANOID config not found on chain.");
   const c = b64(acc.value.data[0]);
   const cv = new DataView(c.buffer, c.byteOffset, c.byteLength);
-  const cfg = { genesis: Number(cv.getBigInt64(41, true)), epochSeconds: cv.getUint32(49, true), limit: cv.getUint16(61, true) };
+  const cfg = { genesis: Number(cv.getBigInt64(41, true)), epochSeconds: cv.getUint32(49, true), rate: cv.getBigUint64(53, true), limit: cv.getUint16(61, true) };
   // Member: disc 8 | bump 1 | depositor 32 | commitment 32 | leaf_index u32 | start_epoch u32 | end_epoch u32 | questions u64 | status u8
   const members = all.map(({ account }) => {
     const d = b64(account.data[0]);
@@ -194,13 +200,37 @@ async function zkFile(name) {
   if (got !== ZK[name]) throw new Error(`${name} does not match the published file. Delete ${path} and start again.`);
   return data;
 }
+// The prover runs in a context of its own realm (DONT_CONTEXTIFY) that holds no object from this one: no fetch,
+// no process, no file access, nothing whose constructor leads back here. The few browser functions snarkjs
+// looks for are written inside it, randomness and the circuit files go in as bytes copied into arrays it made,
+// and the proof comes out as a string. So even a prover that misbehaved could not send the secret anywhere.
+const SANDBOX = `
+globalThis.btoa = (s) => { const c = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let o = "";
+  for (let i = 0; i < s.length; i += 3) { const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), d = s.charCodeAt(i + 2);
+    o += c[a >> 2] + c[((a & 3) << 4) | (b >> 4 || 0)] + (i + 1 < s.length ? c[((b & 15) << 2) | (d >> 6 || 0)] : "=") + (i + 2 < s.length ? c[d & 63] : "="); }
+  return o; };
+globalThis.TextEncoder = class { encode(s = "") { const u = unescape(encodeURIComponent(s)); const a = new Uint8Array(u.length); for (let i = 0; i < u.length; i++) a[i] = u.charCodeAt(i); return a; } };
+globalThis.TextDecoder = class { decode(a) { if (!a) return ""; const b = a instanceof Uint8Array ? a : new Uint8Array(a.buffer ?? a, a.byteOffset ?? 0, a.byteLength); let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); try { return decodeURIComponent(escape(s)); } catch { return s; } } };
+globalThis.setTimeout = (f, ...args) => { Promise.resolve().then(() => f(...args)); return 0; };
+globalThis.__pool = new Uint8Array(1 << 16); globalThis.__pos = 0;
+globalThis.crypto = { getRandomValues(a) { const b = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); for (let i = 0; i < b.length; i++) { if (__pos >= __pool.length) throw new Error("random pool empty"); b[i] = __pool[__pos++]; } return a; } };
+`;
 let snark = null;
 function prover() {
   return (snark ??= (async () => {
+    if (!vm.constants?.DONT_CONTEXTIFY) throw new Error("The connector needs Node.js 20.18, 22.8 or newer.");
     const [js, wasm, zkey] = await Promise.all(Object.keys(ZK).map(zkFile));
-    vm.runInThisContext(js.toString("utf8"), { filename: "snarkjs.min.js" });
-    const sj = globalThis.snarkjs;
-    return (input) => sj.groth16.fullProve(input, { type: "mem", data: new Uint8Array(wasm) }, { type: "mem", data: new Uint8Array(zkey) });
+    const ctx = vm.createContext(vm.constants.DONT_CONTEXTIFY);
+    const run = (code) => vm.runInContext(code, ctx);
+    run(SANDBOX);
+    const into = (name, bytes) => run(`globalThis.${name} = new Uint8Array(${bytes.length}); ${name}`).set(bytes);
+    into("__wasm", wasm);
+    into("__zkey", zkey);
+    run(js.toString("utf8"));
+    return async (input) => {
+      randomFillSync(run("__pos = 0; __pool"));
+      return JSON.parse(await run(`snarkjs.groth16.fullProve(JSON.parse(${JSON.stringify(JSON.stringify(input))}), { type: "mem", data: __wasm }, { type: "mem", data: __zkey }).then((r) => JSON.stringify(r))`));
+    };
   })());
 }
 
@@ -300,6 +330,13 @@ async function buy(questions) {
   if (first.status !== 402) throw new Error(`Could not get a price (${first.status}): ${(await first.json().catch(() => ({}))).error ?? ""}`);
   const required = JSON.parse(Buffer.from(first.headers.get("payment-required"), "base64").toString("utf8"));
   const req = required.accepts.find((a) => a.scheme === "exact" && a.network.startsWith("solana:"));
+  // The wallet signs only what this computer expects: USDC, to the gateway it knows, at no more than the price
+  // the program on chain sets plus the published setup fee. A gateway that asked for more gets nothing.
+  const { cfg } = await chain(true);
+  const most = BigInt(questions) * cfg.rate + SETUP_USDC;
+  if (!req || req.asset !== USDC || req.payTo !== GATEWAY || req.extra?.feePayer !== GATEWAY)
+    throw new Error(`The gateway asked for a payment this connector does not recognise (to ${req?.payTo}, in ${req?.asset}). Nothing was signed.`);
+  if (BigInt(req.amount) > most) throw new Error(`The gateway asked ${Number(req.amount) / 1e6} USDC for ${questions} questions, more than the ${Number(most) / 1e6} USDC the program sets. Nothing was signed.`);
   const usdc = (await rpc("getTokenAccountBalance", [toB58(ataOf(payer.pub, fromB58(req.asset))), { commitment: "confirmed" }]).catch(() => null))?.value.amount ?? "0";
   if (BigInt(usdc) < BigInt(req.amount)) throw new Error(`${questions} questions cost ${Number(req.amount) / 1e6} USDC and wallet ${toB58(payer.pub)} has ${Number(usdc) / 1e6}.`);
   // The secret is written before paying, so a crash after the payment cannot lose what it buys. A membership
@@ -336,34 +373,47 @@ async function costOf(model) {
 }
 
 let state, warned = false;
-async function freshKey(cost, fresh = false) {
+/** A key for `cost` questions. With `again` (a refused key's numbers and x) it proves the same numbers with the
+ *  same x: y = secret + a1 * x does not depend on the member list, so resending gives the gateway the very same
+ *  points and nothing new, and a refusal never costs questions. */
+async function freshKey(cost, fresh = false, again = null) {
   const { cfg, members } = await chain(fresh);
   const me = members.find((m) => m.commitment === commitmentOf(state.secret));
   if (!me) throw new Error("No membership on chain matches this code.");
   if (me.status !== "active") throw new Error("This membership is not active (it was slashed).");
   const epoch = epochAt(cfg, await chainNow());
   if (epoch > me.endEpoch) throw new Error("This membership's questions have expired. Top up on the site.");
-  // Another device spent questions past our counter: never offer those again.
-  const seen = await seenNext(state.secret, me.questions, state.next);
-  if (seen > state.next) {
-    if (!warned) console.warn(`warning: another device spent questions ${state.next} to ${seen - 1} of this membership. Use one place at a time.`);
-    warned = true;
-    state.next = seen;
+  let start, x;
+  if (again) ({ start, x } = again);
+  else {
+    // Another device spent questions past our counter: never offer those again.
+    const seen = await seenNext(state.secret, me.questions, state.next);
+    if (seen > state.next) {
+      if (!warned) console.warn(`warning: another device spent questions ${state.next} to ${seen - 1} of this membership. Use one place at a time.`);
+      warned = true;
+      state.next = seen;
+    }
+    if (state.next + cost > me.questions) throw new Error(`Only ${me.questions - state.next} questions are left. Buy more on the site, or with x402: node connect.mjs buy <questions>.`);
+    // Reserve and write the counter before any proof exists: a question is never offered twice.
+    start = state.next;
+    state.next += cost;
+    save(state);
+    x = randomField();
   }
-  if (state.next + cost > me.questions) throw new Error(`Only ${me.questions - state.next} questions are left. Buy more on the site, or with x402: node connect.mjs buy <questions>.`);
-  // Reserve and write the counter before any proof exists: a question is never offered twice.
-  const start = state.next;
-  state.next += cost;
-  save(state);
-  const prove = await prover();
-  const tree = treeOf(members);
-  const x = randomField();
   const spends = [];
-  for (let done = 0; done < cost; done += W) {
-    spends.push(await proveSpend({ secret: state.secret, endEpoch: me.endEpoch, questions: me.questions, leafIndex: me.leafIndex, tree, epoch, limit: cfg.limit, start: start + done, weight: Math.min(W, cost - done), x }, prove));
+  try {
+    const prove = await prover();
+    const tree = treeOf(members);
+    for (let done = 0; done < cost; done += W) {
+      spends.push(await proveSpend({ secret: state.secret, endEpoch: me.endEpoch, questions: me.questions, leafIndex: me.leafIndex, tree, epoch, limit: cfg.limit, start: start + done, weight: Math.min(W, cost - done), x }, prove));
+    }
+  } catch (e) {
+    // Nothing left this computer, so the numbers are still unspent: give them back.
+    if (!again && state.next === start + cost) { state.next = start; save(state); }
+    throw e;
   }
   if (process.env.PARANOID_DEBUG) console.log(`key x=${x.toString(16).slice(0, 10)} questions ${start}..${start + cost - 1}`);
-  return packKey(spends);
+  return { key: packKey(spends), start, x };
 }
 
 // ---- the local endpoint
@@ -388,10 +438,11 @@ async function forward(body, model) {
   const cost = await costOf(model);
   const send = (key) => fetch(`${SITE}/api/v1/chat/completions`, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Bearer ${key}` } });
   const t = Date.now();
-  let up = await send(await freshKey(cost));
+  const k = await freshKey(cost);
+  let up = await send(k.key);
   if (up.status === 401 && (await up.clone().text()).includes("stale_member_list")) {
-    // Someone joined or left since our read. Those questions were refused before use; spend new ones.
-    up = await send(await freshKey(cost, true));
+    // Someone joined or left since our read. Those questions were refused before use: prove the same ones again.
+    up = await send((await freshKey(cost, true, k)).key);
   }
   console.log(`${new Date().toISOString().slice(11, 19)} ${String(model ?? "default")}: ${cost} question${cost === 1 ? "" : "s"}, ${up.status} in ${Date.now() - t} ms`);
   return up;

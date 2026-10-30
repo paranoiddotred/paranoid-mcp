@@ -1,12 +1,12 @@
 # PARANOID MCP
 
-Ask AI models in private from Claude Code, Cursor or any MCP client. Every question carries a fresh zero-knowledge proof made on your own computer, so the PARANOID gateway can check that it was paid for without learning who asked or tying it to any other question.
+Ask AI models in private from Claude Code, Cursor or any MCP client. Every question carries a fresh zero-knowledge proof made on your own computer, so the PARANOID gateway can check that it was paid for without learning which member asked or tying it to any other question. To keep your network address apart as well, see [What stays visible](SECURITY.md#what-stays-visible).
 
 [PARANOID](https://paranoid.red) runs open models such as DeepSeek, Kimi, Qwen and GLM, including uncensored ones. Questions are bought once with USDC on Solana, and agents can buy them on their own with [x402](https://github.com/coinbase/x402). The Solana program and the circuit behind every proof are open at [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), and that source builds to the exact bytes deployed on mainnet.
 
 ## Install
 
-It is one file with no dependencies and needs Node.js 20 or newer.
+It is one file with no packages to install and needs Node.js 20.18, 22.8 or newer.
 
 ```bash
 mkdir -p ~/paranoid && curl -o ~/paranoid/connect.mjs https://paranoid.red/connect.mjs
@@ -118,7 +118,7 @@ Full documentation is at [paranoid.red/docs/agents](https://paranoid.red/docs/ag
 
 ## Files it downloads
 
-On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. Their SHA-256 hashes are written inside `connect.mjs`, and it refuses to run anything that does not match.
+On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. The prover is snarkjs 0.7.6 exactly as published on npm, and the circuit files are the ones published in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), so anyone can compare them. Their SHA-256 hashes are written inside `connect.mjs`, it refuses to run anything that does not match, and the prover runs in a separate JavaScript realm with no network, files or process to reach, so the secret it is given cannot leave. [SECURITY.md](SECURITY.md) has the details.
 
 ## License
 
