@@ -1,0 +1,58 @@
+name: registry
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v1.3.0
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      # A release checks out its own tag; a manual run checks out main, which must still match that release.
+      - uses: actions/checkout@v4
+
+      - name: Point server.json at the release's extension and its real hash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          [ "$(node -p 'require("./package.json").version')" = "$version" ] || { echo "package.json is not $version"; exit 1; }
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/paranoid.mcpb"
+          curl --fail --location --silent --show-error --output paranoid.mcpb "$url"
+          unzip -p paranoid.mcpb server/connect.mjs | cmp - connect.mjs
+          unzip -p paranoid.mcpb server/bin.mjs | cmp - bin.mjs
+          sha="$(sha256sum paranoid.mcpb | cut -d' ' -f1)"
+          jq --arg v "$version" --arg u "$url" --arg s "$sha" \
+            '.version = $v | .packages[0].identifier = $u | .packages[0].fileSha256 = $s' server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish
