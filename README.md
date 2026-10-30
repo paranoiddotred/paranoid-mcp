@@ -12,6 +12,14 @@ It is one file with no dependencies and needs Node.js 20 or newer.
 mkdir -p ~/paranoid && curl -o ~/paranoid/connect.mjs https://paranoid.red/connect.mjs
 ```
 
+The file paranoid.red serves is byte for byte the `connect.mjs` in this repository. Each
+[release](https://github.com/paranoiddotred/paranoid-mcp/releases) lists its SHA-256, so you can check the copy
+you downloaded before you run it:
+
+```bash
+shasum -a 256 ~/paranoid/connect.mjs
+```
+
 **Claude Code**
 
 ```bash
