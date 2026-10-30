@@ -4,6 +4,10 @@ Ask AI models in private from Claude Code, Cursor or any MCP client. Every quest
 
 [PARANOID](https://paranoid.red) runs open models such as DeepSeek, Kimi, Qwen and GLM, including uncensored ones. Questions are bought once with USDC on Solana, and agents can buy them on their own with [x402](https://github.com/coinbase/x402). The Solana program and the circuit behind every proof are open at [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), and that source builds to the exact bytes deployed on mainnet.
 
+It is listed in the [official MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.paranoiddotred/paranoid-mcp)
+as `io.github.paranoiddotred/paranoid-mcp`, published straight from each release by CI, and on
+[Glama](https://glama.ai/mcp/servers/paranoiddotred/paranoid-mcp).
+
 ## Install
 
 ### The quick way
