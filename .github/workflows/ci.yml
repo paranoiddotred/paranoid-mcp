@@ -29,6 +29,11 @@ jobs:
         with:
           node-version: 22
       - run: bash scripts/pack-mcpb.sh
+      - name: README installs the version in package.json
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          [ "$(grep -o 'paranoid-mcp#v[0-9.]*' README.md | sort -u)" = "paranoid-mcp#v$v" ]
+          node -e 'const v=require("./package.json").version; for (const m of require("fs").readFileSync("README.md","utf8").matchAll(/install-mcp\?name=paranoid&config=([^)]+)/g)) if (!Buffer.from(decodeURIComponent(m[1]),"base64").toString().includes("#v"+v)) process.exit(1)'
       - run: cmp connect.mjs build/mcpb/server/connect.mjs && cmp bin.mjs build/mcpb/server/bin.mjs
 
   reproduce:

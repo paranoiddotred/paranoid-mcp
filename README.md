@@ -13,20 +13,21 @@ and double-click it, or drag it into the Claude window. Paste the connector code
 [paranoid.red](https://paranoid.red/app) into its settings, or choose a Solana wallet file holding USDC so the buy
 tool can get questions. Claude Desktop brings its own Node.js, so there is nothing else to install.
 
-**Cursor.** [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=paranoid&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImdpdGh1YjpwYXJhbm9pZGRvdHJlZC9wYXJhbm9pZC1tY3AiLCJtY3AiXX0%3D)
+**Cursor.** [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=paranoid&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImdpdGh1YjpwYXJhbm9pZGRvdHJlZC9wYXJhbm9pZC1tY3AjdjEuMy4wIiwibWNwIl19)
 
 **Claude Code.**
 
 ```bash
-claude mcp add paranoid -- npx -y github:paranoiddotred/paranoid-mcp mcp
+claude mcp add paranoid -- npx -y github:paranoiddotred/paranoid-mcp#v1.3.0 mcp
 ```
 
-Cursor and Claude Code run it straight from this repository with `npx`, which needs Node.js and git. To use
+Cursor and Claude Code run it straight from this repository with `npx`, pinned to the release tag so you get the
+version whose hashes are published, and that needs Node.js and git. To use
 questions you already bought, run it once in a terminal and paste the connector code when it asks, so the code
 never lands in your shell history. It then serves the local endpoint until you stop it with Ctrl+C.
 
 ```bash
-npx -y github:paranoiddotred/paranoid-mcp
+npx -y github:paranoiddotred/paranoid-mcp#v1.3.0
 ```
 
 You can also put the code in the client's settings as `PARANOID_CODE`, the way the Claude Desktop extension
