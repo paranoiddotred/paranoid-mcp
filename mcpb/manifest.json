@@ -1,0 +1,63 @@
+{
+  "manifest_version": "0.3",
+  "name": "paranoid",
+  "display_name": "PARANOID",
+  "version": "1.3.0",
+  "description": "Ask AI models in private, with a zero-knowledge proof made on your computer for every question.",
+  "long_description": "PARANOID gives Claude four tools: ask, models, balance and buy. Each question goes to one of PARANOID's AI models with a fresh zero-knowledge key made on your computer, so the PARANOID gateway can check that the question was paid for without learning who asked or tying it to any other question.\n\nPaste the connector code from the Keys tab on paranoid.red to use questions you already bought, or choose a Solana wallet file holding USDC and let the buy tool get new ones with x402.\n\nThe extension runs `connect.mjs` from the paranoid-mcp repository, byte for byte the file every release lists the SHA-256 of.",
+  "author": {
+    "name": "PARANOID",
+    "url": "https://paranoid.red"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paranoiddotred/paranoid-mcp.git"
+  },
+  "homepage": "https://paranoid.red",
+  "documentation": "https://paranoid.red/docs/connector",
+  "support": "https://github.com/paranoiddotred/paranoid-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/bin.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/bin.mjs", "mcp"],
+      "env": {
+        "PARANOID_CODE": "${user_config.connector_code}",
+        "PARANOID_PAYER": "${user_config.payer}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "ask", "description": "Ask one of PARANOID's AI models a question in private." },
+    { "name": "models", "description": "List PARANOID's models and how many questions one message to each costs." },
+    { "name": "balance", "description": "How many questions this membership has left and the last day they can be used." },
+    { "name": "buy", "description": "Buy a membership with an x402 payment in USDC on Solana from the chosen wallet." }
+  ],
+  "keywords": ["privacy", "zero-knowledge", "solana", "x402", "ai"],
+  "license": "MIT",
+  "privacy_policies": ["https://paranoid.red/docs/security"],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20.18.0"
+    }
+  },
+  "user_config": {
+    "connector_code": {
+      "type": "string",
+      "title": "Connector code",
+      "description": "The code from the Keys tab on paranoid.red/app. Leave it empty if you only buy with a wallet below.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "payer": {
+      "type": "file",
+      "title": "Wallet for buying (optional)",
+      "description": "A Solana keypair file whose wallet holds USDC. Only the buy tool uses it.",
+      "required": false
+    }
+  }
+}
