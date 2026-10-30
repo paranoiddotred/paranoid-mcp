@@ -36,6 +36,7 @@ const CONFIG = process.env.PARANOID_CONFIG ?? "EevCQ789SrwghbBHQjVonGFgxNExeqtAc
 const PORT = Number(process.env.PARANOID_PORT ?? 4141);
 const HOME = process.env.PARANOID_HOME ?? join(homedir(), ".paranoid");
 const STATE = join(HOME, "connector.json");
+const VERSION = "1.2.2";
 // What `buy` agrees to pay: USDC, to this gateway wallet, at most the program's price plus this setup fee.
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GATEWAY = process.env.PARANOID_GATEWAY ?? "E9UMSt9mEQoUcoW8ACqaRTPPwyK9KkuD3XBFp8U2V5iX";
@@ -156,8 +157,12 @@ function packKey(spends) {
 
 // ---- chain reads over plain JSON-RPC (through the site's relay by default), cached briefly
 
-async function rpc(method, params) {
-  const res = await fetch(RPC, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+// Every request goes out on a connection of its own (Connection: close), so the gateway cannot tie two requests
+// together by the socket they share.
+const net = (url, init = {}) => fetch(url, { ...init, headers: { ...init.headers, connection: "close" } });
+
+async function rpc(method, params, url = RPC) {
+  const res = await net(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
   const j = await res.json();
   if (j.error) throw new Error(`Solana RPC ${method}: ${j.error.message ?? JSON.stringify(j.error)}`);
   return j.result;
@@ -191,7 +196,7 @@ const epochAt = (cfg, t) => Math.max(0, Math.floor((t - cfg.genesis) / cfg.epoch
 /** One past the last question of this secret the gateway has seen at or after `from` (256 unseen in a row ends
  *  it), or `from` itself. Numbers below `from` are already behind this counter, so they are not hashed again. */
 async function seenNext(secret, questions, from) {
-  const res = await fetch(`${SITE}/api/v1/used`, { cache: "no-store" });
+  const res = await net(`${SITE}/api/v1/used`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Could not read the list of used questions (${res.status}).`);
   const used = new Set((await res.text()).split("\n").filter(Boolean));
   let next = from;
@@ -207,7 +212,7 @@ async function zkFile(name) {
   const path = join(HOME, "zk", name);
   if (!existsSync(path)) {
     mkdirSync(join(HOME, "zk"), { recursive: true, mode: 0o700 });
-    const res = await fetch(`${SITE}/zk/${name}`);
+    const res = await net(`${SITE}/zk/${name}`);
     if (!res.ok) throw new Error(`Could not download ${name} (${res.status}).`);
     writeFileSync(path, Buffer.from(await res.arrayBuffer()));
   }
@@ -256,12 +261,11 @@ function prover() {
 function load() {
   if (!existsSync(STATE)) return null;
   const j = JSON.parse(readFileSync(STATE, "utf8"));
-  const p = j.pending;
-  return { secret: BigInt(j.secret), next: Number(j.next), pending: p ? { start: Number(p.start), cost: Number(p.cost), x: BigInt(p.x) } : null };
+  return { secret: BigInt(j.secret), next: Number(j.next), pending: (j.pending ?? []).map((p) => ({ start: Number(p.start), cost: Number(p.cost), x: BigInt(p.x) })) };
 }
 function save(s) {
   mkdirSync(HOME, { recursive: true, mode: 0o700 });
-  const pending = s.pending ? { start: s.pending.start, cost: s.pending.cost, x: s.pending.x.toString() } : undefined;
+  const pending = (s.pending ?? []).map((p) => ({ start: p.start, cost: p.cost, x: p.x.toString() }));
   writeFileSync(STATE, JSON.stringify({ secret: s.secret.toString(), next: s.next, pending }), { mode: 0o600 });
   chmodSync(STATE, 0o600);
 }
@@ -338,6 +342,16 @@ function paymentTx(req, payer, blockhash) {
   return Buffer.from([...shortvec(2), ...new Uint8Array(64), ...payer.sign(message), ...message]).toString("base64");
 }
 
+// The price `buy` agrees to is read from Solana through PARANOID_RPC if you set one, and otherwise through a
+// public node, never through paranoid.red's relay: the gateway that sends the bill does not also say the price.
+const PRICE_RPC = process.env.PARANOID_RPC ?? "https://api.mainnet-beta.solana.com";
+async function priceOnChain() {
+  const acc = await rpc("getAccountInfo", [CONFIG, { encoding: "base64", commitment: "confirmed" }], PRICE_RPC).catch((e) => { throw new Error(`Could not read the price from Solana (${e.message}). Set PARANOID_RPC to a Solana RPC you trust.`); });
+  if (acc?.value?.owner !== PROGRAM) throw new Error("The PARANOID config read from Solana is not owned by the program. Nothing was signed.");
+  const c = b64(acc.value.data[0]);
+  return new DataView(c.buffer, c.byteOffset, c.byteLength).getBigUint64(53, true);
+}
+
 /** Makes a new secret here, pays for `questions` with the wallet in PARANOID_PAYER, and keeps the secret for the connector. */
 async function buy(questions) {
   if (!process.env.PARANOID_PAYER) throw new Error("Set PARANOID_PAYER to a Solana keypair file: the wallet that pays the USDC.");
@@ -345,14 +359,18 @@ async function buy(questions) {
   const payer = wallet(process.env.PARANOID_PAYER);
   const secret = randomField();
   const url = `${SITE}/api/x402/join?questions=${questions}&commitment=${commitmentOf(secret).toString(16)}`;
-  const first = await fetch(url, { method: "POST" });
+  const first = await net(url, { method: "POST" });
   if (first.status !== 402) throw new Error(`Could not get a price (${first.status}): ${(await first.json().catch(() => ({}))).error ?? ""}`);
-  const required = JSON.parse(Buffer.from(first.headers.get("payment-required"), "base64").toString("utf8"));
-  const req = required.accepts.find((a) => a.scheme === "exact" && a.network.startsWith("solana:"));
+  let req, resource;
+  try {
+    const required = JSON.parse(Buffer.from(first.headers.get("payment-required") ?? "", "base64").toString("utf8"));
+    req = required.accepts.find((a) => a.scheme === "exact" && String(a.network).startsWith("solana:"));
+    resource = required.resource;
+  } catch { req = null; }
+  if (!req || !/^\d+$/.test(String(req.amount)) || typeof req.extra?.memo !== "string") throw new Error("The gateway's price could not be read. Nothing was signed.");
   // The wallet signs only what this computer expects: USDC, to the gateway it knows, at no more than the price
   // the program on chain sets plus the published setup fee. A gateway that asked for more gets nothing.
-  const { cfg } = await chain(true);
-  const most = BigInt(questions) * cfg.rate + SETUP_USDC;
+  const most = BigInt(questions) * (await priceOnChain()) + SETUP_USDC;
   if (!req || req.asset !== USDC || req.payTo !== GATEWAY || req.extra?.feePayer !== GATEWAY)
     throw new Error(`The gateway asked for a payment this connector does not recognise (to ${req?.payTo}, in ${req?.asset}). Nothing was signed.`);
   if (BigInt(req.amount) > most) throw new Error(`The gateway asked ${Number(req.amount) / 1e6} USDC for ${questions} questions, more than the ${Number(most) / 1e6} USDC the program sets. Nothing was signed.`);
@@ -364,9 +382,9 @@ async function buy(questions) {
   if (kept) renameSync(STATE, kept);
   save({ secret, next: 0 });
   const blockhash = req.extra.recentBlockhash ?? (await rpc("getLatestBlockhash", [{ commitment: "confirmed" }])).value.blockhash;
-  const payload = { x402Version: 2, resource: required.resource, accepted: req, payload: { transaction: paymentTx(req, payer, fromB58(blockhash)) } };
+  const payload = { x402Version: 2, resource, accepted: req, payload: { transaction: paymentTx(req, payer, fromB58(blockhash)) } };
   console.log(`Paying ${Number(req.amount) / 1e6} USDC for ${questions} questions from ${toB58(payer.pub)}...`);
-  const paid = await fetch(url, { method: "POST", headers: { "payment-signature": Buffer.from(JSON.stringify(payload)).toString("base64") } });
+  const paid = await net(url, { method: "POST", headers: { "payment-signature": Buffer.from(JSON.stringify(payload)).toString("base64") } });
   const body = await paid.json().catch(() => ({}));
   if (!paid.ok) {
     // Refused before any money moved (a 500 means it moved, so the new secret must stay): put the old membership back.
@@ -392,7 +410,7 @@ async function buy(questions) {
 let models = null;
 async function costOf(model) {
   if (!models || Date.now() - models.at > 300_000) {
-    const j = await (await fetch(`${SITE}/api/v1/models`)).json();
+    const j = await (await net(`${SITE}/api/v1/models`)).json();
     models = { at: Date.now(), list: j.data.map((m) => ({ id: m.id, cost: m.cost ?? 1 })) };
   }
   // The gateway sends an unknown model name to the default model, which is listed first.
@@ -401,6 +419,8 @@ async function costOf(model) {
 
 let state, warned = false;
 const sending = new Set(); // starts of keys on their way to the gateway right now
+/** Forgets a key's numbers once the gateway has answered it or refused it for good. */
+const settled = (start) => { state.pending = (state.pending ?? []).filter((p) => p.start !== start); save(state); };
 /** A key for `cost` questions. With `again` (a refused key's numbers and x) it proves the same numbers with the
  *  same x: y = secret + a1 * x does not depend on the member list, so resending gives the gateway the very same
  *  points and nothing new, and a refusal never costs questions. */
@@ -413,10 +433,7 @@ async function freshKey(cost, fresh = false, again = null) {
   if (epoch > me.endEpoch) throw new Error("This membership's questions have expired. Top up on the site.");
   // A key the gateway never answered (a network error or a 5xx) still holds its numbers: prove them again with
   // the same x, which shows the gateway nothing it has not seen, instead of letting them go to waste.
-  if (!again && state.pending && !sending.has(state.pending.start)) {
-    if (state.pending.cost === cost) again = state.pending;
-    else { state.pending = null; save(state); }
-  }
+  if (!again) again = (state.pending ?? []).find((p) => p.cost === cost && !sending.has(p.start)) ?? null;
   let start, x;
   if (again) ({ start, x } = again);
   else {
@@ -432,7 +449,7 @@ async function freshKey(cost, fresh = false, again = null) {
     start = state.next;
     state.next += cost;
     x = randomField();
-    state.pending = { start, cost, x };
+    state.pending = [...(state.pending ?? []), { start, cost, x }];
     save(state);
   }
   const spends = [];
@@ -444,7 +461,7 @@ async function freshKey(cost, fresh = false, again = null) {
     }
   } catch (e) {
     // Nothing left this computer, so the numbers are still unspent: give them back.
-    if (!again && state.next === start + cost) { state.next = start; state.pending = null; save(state); }
+    if (!again && state.next === start + cost) { state.next = start; settled(start); }
     throw e;
   }
   if (process.env.PARANOID_DEBUG) console.log(`key x=${x.toString(16).slice(0, 10)} questions ${start}..${start + cost - 1}`);
@@ -473,7 +490,7 @@ async function forward(body, model) {
   const cost = await costOf(model);
   const send = async (k) => {
     sending.add(k.start);
-    try { return await fetch(`${SITE}/api/v1/chat/completions`, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Bearer ${k.key}` } }); }
+    try { return await net(`${SITE}/api/v1/chat/completions`, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Bearer ${k.key}` } }); }
     finally { sending.delete(k.start); }
   };
   const t = Date.now();
@@ -485,13 +502,12 @@ async function forward(body, model) {
   }
   if (k.reused && up.status === 402) {
     // The key that looked unanswered had been answered after all: its numbers are spent, so take new ones.
-    state.pending = null;
-    save(state);
+    settled(k.start);
     k = await freshKey(cost);
     up = await send(k);
   }
   // Answered, or refused for good: the numbers are settled. Only a 5xx keeps them for the next request.
-  if (up.status < 500 && state.pending?.start === k.start) { state.pending = null; save(state); }
+  if (up.status < 500) settled(k.start);
   console.log(`${new Date().toISOString().slice(11, 19)} ${String(model ?? "default")}: ${cost} question${cost === 1 ? "" : "s"}, ${up.status} in ${Date.now() - t} ms`);
   return up;
 }
@@ -509,7 +525,7 @@ const server = http.createServer(async (req, res) => {
   if (!onThisComputer(req.headers.host, false) || (req.headers.origin !== undefined && !onThisComputer(req.headers.origin, true)))
     return fail(res, 403, "The connector answers programs on this computer, not web pages.");
   try {
-    if (req.method === "GET" && path === "/v1/models") return await relay(res, await fetch(`${SITE}/api/v1/models`));
+    if (req.method === "GET" && path === "/v1/models") return await relay(res, await net(`${SITE}/api/v1/models`));
     if (req.method !== "POST" || path !== "/v1/chat/completions") return fail(res, 404, "The connector serves GET /v1/models and POST /v1/chat/completions.");
     const body = await readBody(req);
     let model;
@@ -560,7 +576,7 @@ async function balance() {
 
 async function callTool(name, a = {}) {
   if (name === "models") {
-    const j = await (await fetch(`${SITE}/api/v1/models`)).json();
+    const j = await (await net(`${SITE}/api/v1/models`)).json();
     return j.data.filter((m) => m.available !== false).map((m, i) => `${m.id}: ${m.label ?? m.id}, ${m.cost ?? 1} question${(m.cost ?? 1) === 1 ? "" : "s"} a message${i === 0 ? " (default)" : ""}`).join("\n");
   }
   if (name === "balance") return balance();
@@ -589,7 +605,7 @@ function serveMcp() {
     try { msg = JSON.parse(line); } catch { return send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }); }
     if (msg.id === undefined || msg.id === null) return; // a notification
     const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
-    if (msg.method === "initialize") return reply({ protocolVersion: msg.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "paranoid", version: "1.1.0" } });
+    if (msg.method === "initialize") return reply({ protocolVersion: msg.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "paranoid", version: VERSION } });
     if (msg.method === "ping") return reply({});
     if (msg.method === "tools/list") return reply({ tools: TOOLS });
     if (msg.method !== "tools/call") return send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } });

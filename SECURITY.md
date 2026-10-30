@@ -11,10 +11,12 @@ public issue. Include the steps to reproduce and the client you used.
 
 ## What it protects
 
-- The secret that owns your questions stays in `~/.paranoid/connector.json`, readable only by you. It is
-  asked for on first run instead of taken from the command line, so it never lands in shell history.
+- The secret that owns your questions stays in `~/.paranoid/connector.json`, readable only by you (owner-only
+  file permissions on macOS and Linux; on Windows the file sits in your user profile). It is asked for on first
+  run instead of taken from the command line, so it never lands in shell history.
 - Every request gets a key made for it alone, with a new random value, so the gateway cannot tie two
-  requests together through their keys or tell which member sent them.
+  requests together through their keys or tell which member sent them. Every request also goes out on a
+  connection of its own, so two requests never share a socket either.
 - A question number is written to disk before its proof exists, so the same number is never offered twice,
   even after a crash. The public list of spent questions is read before every key, so a number another device
   already spent is skipped instead of slashing the membership. If a proof fails before anything is sent, the
@@ -34,14 +36,17 @@ public issue. Include the steps to reproduce and the client you used.
   questions through it.
 - `buy` signs one x402 payment, a single USDC transfer, only when your MCP client calls it. It signs only a
   payment in USDC, to the gateway wallet `E9UMSt9mEQoUcoW8ACqaRTPPwyK9KkuD3XBFp8U2V5iX`, for no more than the
-  price the program on chain sets plus the 0.30 USDC setup fee. A gateway that asks for anything else gets
-  nothing signed.
+  price the program on chain sets plus the 0.30 USDC setup fee. That price is read from Solana through
+  `PARANOID_RPC` if you set one and otherwise through a public Solana node, never through paranoid.red, and the
+  account it comes from must belong to the PARANOID program. A gateway that asks for anything else, or sends a
+  quote that cannot be read, gets nothing signed.
 
 ## What stays visible
 
 - **Your network address.** The proofs hide which member asks, but every request still leaves from your own
   address. To keep that apart as well, send the connector's traffic through Tor or a VPN: on Node.js 22.21, 24
-  or newer, set `HTTPS_PROXY` to the proxy (for Tor, its `HTTPTunnelPort`) and `NODE_USE_ENV_PROXY=1`. If a
+  or newer, set `HTTPS_PROXY` to the proxy (for Tor, its `HTTPTunnelPort`) and `NODE_USE_ENV_PROXY=1`. This uses
+  Node.js's own proxy support, and CI checks on every push that the requests then go through the proxy. If a
   proxy is set but this Node.js would send requests around it, the connector refuses to start. The web
   app does this for you with its IP shield.
 - **Who bought.** Buying shows which wallet paid for a membership, as any payment on Solana does. It never

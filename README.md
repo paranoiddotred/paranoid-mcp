@@ -6,19 +6,16 @@ Ask AI models in private from Claude Code, Cursor or any MCP client. Every quest
 
 ## Install
 
-It is one file with no packages to install and needs Node.js 20.18, 22.8 or newer.
+It is one file with no packages to install and needs Node.js 20.18, 22.8 or newer. Download it and check it
+against the current [release](https://github.com/paranoiddotred/paranoid-mcp/releases) in one go:
 
 ```bash
-mkdir -p ~/paranoid && curl -o ~/paranoid/connect.mjs https://paranoid.red/connect.mjs
+mkdir -p ~/paranoid && curl -o ~/paranoid/connect.mjs https://paranoid.red/connect.mjs \
+  && echo "8f90ee28b74883a46dcf928efaecfcd452591753851283210edf2788cbdd73c1  $HOME/paranoid/connect.mjs" | shasum -a 256 -c
 ```
 
-The file paranoid.red serves is byte for byte the `connect.mjs` in this repository. Each
-[release](https://github.com/paranoiddotred/paranoid-mcp/releases) lists its SHA-256, so you can check the copy
-you downloaded before you run it. For the current release:
-
-```bash
-echo "ed49f60f77e3a6561b31826b1712489a83924e4666fd94c3c2fefa35365581e3  $HOME/paranoid/connect.mjs" | shasum -a 256 -c
-```
+The file paranoid.red serves is byte for byte the `connect.mjs` in this repository, and every release lists its
+SHA-256, so a copy that was changed anywhere on the way fails that check before it ever runs.
 
 You can also build it yourself from `src/` and the prover and circuit files where they are published (snarkjs
 0.7.6 on npm, the circuit in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid)). CI does the
@@ -63,7 +60,9 @@ Questions cost 0.002 USDC each, 250 at least, plus a 0.30 USDC setup fee when an
 
 ## How it stays private
 
-When you buy questions, your computer makes a secret and sends only a commitment to it, which goes into a member list on Solana. For each question, the connector proves in zero knowledge that it holds the secret of some member with questions left, and marks one numbered question as spent with a nullifier that names no member. The gateway verifies the proof and forwards the question to the model, but it never learns which member asked, and two questions cannot be tied together. Spending the same numbered question twice reveals the secret, and anyone can then slash that membership.
+When you buy questions, your computer makes a secret and sends only a commitment to it, which goes into a member list on Solana. For each question, the connector proves in zero knowledge that it holds the secret of some member with questions left, and marks one numbered question as spent with a nullifier that names no member. The gateway verifies the proof and forwards the question to the model, but it never learns which member asked, two questions cannot be tied together through their proofs, and each request travels on a connection of its own. Your network address is a separate layer: [SECURITY.md](SECURITY.md#what-stays-visible) shows how to route the connector through Tor or a VPN.
+
+Spending the same numbered question twice reveals the secret. Anyone can then slash the membership and recompute every question it ever asked, so keep each membership in one place. The connector writes each number to disk before it is used and reads the public list of spent questions before every key, so this cannot happen by accident.
 
 The design follows [zkAPI](https://github.com/vbuterin/zkapi) by Vitalik Buterin and Davide Crapis, from the Ethereum Foundation and the Open Anonymity Project. PARANOID brings it to Solana.
 

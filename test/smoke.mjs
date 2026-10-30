@@ -72,3 +72,28 @@ const code = await new Promise((resolve) => ignored.on("exit", resolve));
 assert.equal(code, 1);
 assert.match(said, /would not go through it/);
 console.log("ok: a proxy that would be ignored stops the connector");
+
+// With a proxy set the way SECURITY.md says, the requests really go through it. (fetch follows HTTPS_PROXY
+// from Node.js 22.21 and 24 on; older versions are covered by the refusal above.)
+const [major, minor] = process.versions.node.split(".").map(Number);
+if ((major === 22 && minor >= 21) || major >= 24) {
+  const net = await import("node:net");
+  const http = await import("node:http");
+  const tunnels = [];
+  const tunnel = http.createServer().on("connect", (req, sock, head) => {
+    tunnels.push(req.url);
+    const [host, port] = req.url.split(":");
+    const up = net.connect(Number(port), host, () => { sock.write("HTTP/1.1 200 Connection Established\r\n\r\n"); up.write(head); up.pipe(sock); sock.pipe(up); });
+    up.on("error", () => sock.destroy());
+  });
+  await new Promise((resolve) => tunnel.listen(0, "127.0.0.1", resolve));
+  const models = await run(["mcp"], { HTTPS_PROXY: `http://127.0.0.1:${tunnel.address().port}`, NODE_USE_ENV_PROXY: "1" }, (out) => out.split("\n").slice(0, -1).map((line) => JSON.parse(line)).find((m) => m.id === 2), [
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "smoke", version: "1" } } }),
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "models", arguments: {} } }),
+  ]);
+  models.child.kill();
+  tunnel.close();
+  assert.ok(!models.value.result.isError, "the models tool answered through the proxy");
+  assert.ok(tunnels.includes("paranoid.red:443"), `requests went through the proxy: ${tunnels.join(", ")}`);
+  console.log("ok: with HTTPS_PROXY and NODE_USE_ENV_PROXY=1 the requests go through the proxy");
+}
