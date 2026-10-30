@@ -6,6 +6,34 @@ Ask AI models in private from Claude Code, Cursor or any MCP client. Every quest
 
 ## Install
 
+### The quick way
+
+**Claude Desktop.** Download `paranoid.mcpb` from the [latest release](https://github.com/paranoiddotred/paranoid-mcp/releases/latest)
+and double-click it, or drag it into the Claude window. Paste the connector code from the Keys tab on
+[paranoid.red](https://paranoid.red/app) into its settings, or choose a Solana wallet file holding USDC so the buy
+tool can get questions. Claude Desktop brings its own Node.js, so there is nothing else to install.
+
+**Cursor.** [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=paranoid&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImdpdGh1YjpwYXJhbm9pZGRvdHJlZC9wYXJhbm9pZC1tY3AiLCJtY3AiXX0%3D)
+
+**Claude Code.**
+
+```bash
+claude mcp add paranoid -- npx -y github:paranoiddotred/paranoid-mcp mcp
+```
+
+Cursor and Claude Code run it straight from this repository with `npx`, which needs Node.js and git. To use
+questions you already bought, run it once in a terminal and paste the connector code when it asks, so the code
+never lands in your shell history. It then serves the local endpoint until you stop it with Ctrl+C.
+
+```bash
+npx -y github:paranoiddotred/paranoid-mcp
+```
+
+You can also put the code in the client's settings as `PARANOID_CODE`, the way the Claude Desktop extension
+does.
+
+### By hand
+
 It is one file with no packages to install and needs Node.js 20.18, 22.8 or newer. Download it and check it
 against the current [release](https://github.com/paranoiddotred/paranoid-mcp/releases) in one go:
 
