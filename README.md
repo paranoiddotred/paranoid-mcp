@@ -17,7 +17,7 @@ and double-click it, or drag it into the Claude window. Paste the connector code
 [paranoid.red](https://paranoid.red/app) into its settings, or choose a Solana wallet file holding USDC so the buy
 tool can get questions. Claude Desktop brings its own Node.js, so there is nothing else to install.
 
-**Cursor.** [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=paranoid&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImdpdGh1YjpwYXJhbm9pZGRvdHJlZC9wYXJhbm9pZC1tY3AjdjEuMy4wIiwibWNwIl19)
+**Cursor.** [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=paranoid&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImdpdGh1YjpwYXJhbm9pZGRvdHJlZC9wYXJhbm9pZC1tY3AjdjEuNC4wIiwibWNwIl19)
 
 **Claude Code.**
 
