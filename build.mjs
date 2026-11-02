@@ -12,7 +12,9 @@ const out = readFileSync(at("src/connect.src.mjs"), "utf8")
   .replace("__POSEIDON_CONSTANTS__", JSON.stringify(JSON.parse(readFileSync(at("src/poseidon-constants.json"), "utf8"))))
   .replace("__SHA_SNARKJS__", sha("snarkjs.min.js"))
   .replace("__SHA_WASM__", sha("request.wasm"))
-  .replace("__SHA_ZKEY__", sha("request.zkey"));
+  .replace("__SHA_ZKEY__", sha("request.zkey"))
+  .replace("__SHA_DCAP_JS__", sha("dcap-qvl-web.js"))
+  .replace("__SHA_DCAP_WASM__", sha("dcap-qvl-web_bg.wasm"));
 if (/__[A-Z_]+__/.test(out)) throw new Error("a placeholder was left in connect.mjs");
 writeFileSync(at("connect.mjs"), out);
 console.log(`connect.mjs ${out.length} bytes, sha256 ${createHash("sha256").update(out).digest("hex")}`);

@@ -7,13 +7,19 @@
 //                             or, with no site at all: makes a new secret here and pays USDC for 500 questions with x402
 //   node connect.mjs mcp      serves the same questions as MCP tools on stdin and stdout (ask, models, balance, buy)
 //                             for Claude Code, Cursor and other MCP clients; see /docs/agents
+//   node connect.mjs ask "…"  asks once from the terminal (text piped in is added to the question); chat keeps a
+//                             conversation; check proves the gateway's chip and sends one sealed request
 //
 // Then point Zed, your app, an agent or curl at http://127.0.0.1:4141/v1. Any API key string works. For each chat
 // request the connector proves the model's price in questions from your membership, here on your computer, with
 // a new random key, and forwards it to the gateway. Keys never outlive one request, so the day change never breaks
-// your app and no two keys share anything that could tie them together. The requests still leave from your own
-// network address; to keep that apart from them too, send them through Tor or a VPN (HTTPS_PROXY with
-// NODE_USE_ENV_PROXY=1 on Node.js 22.21, 24 or newer).
+// your app and no two keys share anything that could tie them together.
+//
+// Before the first question, and again every ten minutes, it checks the gateway's chip the way the app does:
+// Intel's signature, a fresh nonce, and the build against the list PARANOID's multisig keeps on Solana, read from a
+// Solana RPC PARANOID does not run. Every request is then sealed to that chip with Oblivious HTTP and carried by an
+// independent relay, so nothing on the way, paranoid.red included, can read it, and the gateway sees the relay's
+// address instead of yours. If any check fails, nothing is sent.
 //
 // One membership, one place: after moving your code here, the site forgets it in that browser. Spending the same
 // question twice gives the secret away and the membership is slashed, so the connector also reads the public list
@@ -23,7 +29,7 @@
 
 import http from "node:http";
 import vm from "node:vm";
-import { createHash, createPrivateKey, randomFillSync, sign } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, randomBytes, randomFillSync, sign } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -36,7 +42,7 @@ const CONFIG = process.env.PARANOID_CONFIG ?? "EevCQ789SrwghbBHQjVonGFgxNExeqtAc
 const PORT = Number(process.env.PARANOID_PORT ?? 4141);
 const HOME = process.env.PARANOID_HOME ?? join(homedir(), ".paranoid");
 const STATE = join(HOME, "connector.json");
-const VERSION = "1.2.2";
+const VERSION = "1.4.0";
 // What `buy` agrees to pay: USDC, to this gateway wallet, at most the program's price plus this setup fee.
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GATEWAY = process.env.PARANOID_GATEWAY ?? "E9UMSt9mEQoUcoW8ACqaRTPPwyK9KkuD3XBFp8U2V5iX";
@@ -61,6 +67,12 @@ const ZK = {
   "snarkjs.min.js": "__SHA_SNARKJS__",
   "request.wasm": "__SHA_WASM__",
   "request.zkey": "__SHA_ZKEY__",
+};
+// Intel's quote verifier, @phala/dcap-qvl-web 0.3.3 (MIT), the Rust dcap-qvl built to WebAssembly: the same files the app uses.
+const PINS = {
+  ...ZK,
+  "dcap-qvl-web.js": "__SHA_DCAP_JS__",
+  "dcap-qvl-web_bg.wasm": "__SHA_DCAP_WASM__",
 };
 
 // ---- Poseidon over BN254 with circomlib's parameters (inputs 1, 2 and 3), vendored from poseidon-lite 0.3.0 (MIT)
@@ -218,7 +230,7 @@ async function zkFile(name) {
   }
   const data = readFileSync(path);
   const got = createHash("sha256").update(data).digest("hex");
-  if (got !== ZK[name]) throw new Error(`${name} does not match the published file. Delete ${path} and start again.`);
+  if (got !== PINS[name]) throw new Error(`${name} does not match the published file. Delete ${path} and start again.`);
   return data;
 }
 // The prover runs in a context of its own realm (DONT_CONTEXTIFY) that holds no object from this one: no fetch,
@@ -254,6 +266,208 @@ function prover() {
       return JSON.parse(await run(`snarkjs.groth16.fullProve(JSON.parse(${JSON.stringify(JSON.stringify(input))}), { type: "mem", data: __wasm }, { type: "mem", data: __zkey }).then((r) => JSON.stringify(r))`));
     };
   })());
+}
+
+// ---- the gateway's chip, checked before any question leaves this computer
+//
+// The same three checks the app makes (paranoid.red/docs/security): Intel's signature on the chip's quote, the
+// quote binding the sealing key to a nonce made here, and the chip's build being on the list PARANOID's 2-of-3
+// multisig keeps on Solana. The list is read from a Solana RPC that PARANOID does not run.
+const LIST = process.env.PARANOID_GATE_RECORD ?? "p2UnUpGKaoc8dZCy6T55f2FDPiXa6DF5SENq1BfSfw8";
+const LIST_AUTHORITY = "CPLdvCZRYqH6T5Wfs4PCoqC9owrrM4LPE2BuhpTeU8dQ"; // the Squads vault
+const LIST_RPC = process.env.PARANOID_LIST_RPC ?? "https://api.mainnet-beta.solana.com";
+const RECORD_PROGRAM = "recr1L3PCGKLbckBqMNcJhuuyU1zgo8nBhfLVsJNwr5";
+// Oblivious HTTP relays run apart from PARANOID: each sees your address and a sealed blob, never what is inside.
+// Set PARANOID_RELAYS to "" to post sealed blobs to the gateway yourself.
+const RELAYS = (process.env.PARANOID_RELAYS ?? "https://relay.oblivious.network/potent-sky-71,https://relay-production-e23a.up.railway.app/gateway")
+  .split(",").map((u) => u.trim()).filter(Boolean);
+
+const digest = (algo, ...parts) => createHash(algo).update(Buffer.concat(parts)).digest();
+
+/** The approved builds: an SPL Record account written only by the vault. 33 bytes of header (version,
+ *  authority), "PGW1", a count, then per build a 16-byte tag and the compose hash, MRTD, RTMR0, RTMR1, RTMR2. */
+async function approvedBuilds() {
+  const v = (await rpc("getAccountInfo", [LIST, { encoding: "base64", commitment: "confirmed" }], LIST_RPC).catch(() => null))?.value;
+  if (!v) throw new Error("The list of approved gateway builds could not be read from Solana. Nothing was sent.");
+  const d = Buffer.from(v.data[0], "base64");
+  if (v.owner !== RECORD_PROGRAM || d.length < 518 || d[0] !== 1 || toB58(d.subarray(1, 33)) !== LIST_AUTHORITY || d.toString("latin1", 33, 37) !== "PGW1" || d[37] < 1 || d[37] > 2)
+    throw new Error("The gateway list on Solana is not the one PARANOID's multisig writes. Nothing was sent.");
+  return Array.from({ length: d[37] }, (_, i) => {
+    const e = d.subarray(38 + i * 240, 38 + (i + 1) * 240);
+    return { tag: e.toString("latin1", 0, 16).replace(/\0+$/, ""), measured: e.subarray(16).toString("hex") };
+  });
+}
+
+let qvl = null;
+const intel = () => (qvl ??= (async () => {
+  const [js, wasm] = await Promise.all(["dcap-qvl-web.js", "dcap-qvl-web_bg.wasm"].map(zkFile));
+  const m = await import(`data:text/javascript;base64,${js.toString("base64")}`);
+  m.initSync({ module: wasm });
+  return m;
+})().catch((e) => { qvl = null; throw e; }));
+
+let proven = null;
+/** The chip's sealing key, after its proof checks out. Checked again every ten minutes. */
+async function gate() {
+  if (proven && Date.now() - proven.at < 600_000) return proven;
+  const nonce = randomBytes(32).toString("hex");
+  const r = await net(`${SITE}/api/gate/attest?nonce=${nonce}`);
+  if (!r.ok) throw new Error("The gateway's chip proof could not be fetched. Nothing was sent.");
+  const a = await r.json();
+  const q = Buffer.from(a.quote ?? "", "hex"), B = 48; // TDX quote v4: 48-byte header, then the TD report body
+  if (q.length < B + 584 || q.readUInt16LE(0) !== 4 || q.readUInt32LE(4) !== 0x81) throw new Error("The gateway's proof is not an Intel TDX quote. Nothing was sent.");
+
+  // 1. Intel's signature, checked against Intel's own signed collateral.
+  if (!a.collateral) throw new Error("Intel's collateral for the gateway's chip is not available right now. Nothing was sent.");
+  const verifier = await intel();
+  let status;
+  try { status = verifier.js_verify(q, a.collateral, BigInt(Math.floor(Date.now() / 1000))).status; }
+  catch { throw new Error("Intel's signature on the gateway's proof does not check out. Nothing was sent."); }
+  if (status !== "UpToDate") throw new Error(`The gateway's chip firmware is not up to date (${status}). Nothing was sent.`);
+
+  // 2. The quote binds this key and this nonce, and the box is not in debug mode.
+  if (q[B + 120] & 1) throw new Error("The gateway runs in debug mode, which lets its host look inside. Nothing was sent.");
+  const statement = `{"key_config":"${a.key_config}","nonce":"${nonce}","purpose":"paranoid.gateway.v1"}`;
+  if (a.nonce !== nonce || !q.subarray(B + 520, B + 552).equals(digest("sha256", Buffer.from(statement))) || q.subarray(B + 552, B + 584).some((b) => b !== 0))
+    throw new Error("The key we were given is not the one the gateway's chip vouches for. Nothing was sent.");
+
+  // 3. An approved build: the boot measurements, then its compose file replayed into RTMR3.
+  const m = (off) => q.subarray(B + off, B + off + 48);
+  let rtmr3 = Buffer.alloc(48), compose = "";
+  for (const e of JSON.parse(a.event_log)) {
+    if (String(e.imr) !== "3") continue;
+    const type = Buffer.alloc(4);
+    type.writeUInt32LE(Number(e.event_type));
+    const d = digest("sha384", type, Buffer.from(":"), Buffer.from(e.event), Buffer.from(":"), Buffer.from(e.event_payload, "hex"));
+    if (e.digest && d.toString("hex") !== e.digest) throw new Error("The gateway's boot log does not add up. Nothing was sent.");
+    rtmr3 = digest("sha384", rtmr3, d);
+    if (e.event === "compose-hash") compose = e.event_payload;
+  }
+  if (!rtmr3.equals(m(472))) throw new Error("The gateway's boot log does not match its chip. Nothing was sent.");
+  if (digest("sha256", Buffer.from(a.app_compose)).toString("hex") !== compose) throw new Error("The gateway's setup does not match its boot log. Nothing was sent.");
+  const measured = compose + [136, 328, 376, 424].map((o) => m(o).toString("hex")).join("");
+  const build = (await approvedBuilds()).find((b) => b.measured === measured);
+  if (!build) throw new Error("The gateway runs a build that is not on PARANOID's list on Solana, so nothing was sent.");
+
+  if (!proven || proven.build !== build.tag) console.log(`Gateway chip checked: Intel signature, build ${build.tag} approved on Solana.`);
+  proven = { key: Buffer.from(a.key_config, "base64"), build: build.tag, at: Date.now() };
+  return proven;
+}
+
+// ---- sealing: Oblivious HTTP (RFC 9458) with HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256),
+// HKDF-SHA256 and AES-128-GCM, the suite the app uses. Only the chip that proved the key can open a request,
+// and the answer comes back sealed piece by piece (draft-ietf-ohai-chunked-ohttp) while it streams.
+
+const hmac = (key, ...parts) => createHmac("sha256", key).update(Buffer.concat(parts)).digest();
+function expand(prk, info, len) {
+  let t = Buffer.alloc(0), out = Buffer.alloc(0);
+  for (let i = 1; out.length < len; i++) { t = hmac(prk, t, info, Buffer.from([i])); out = Buffer.concat([out, t]); }
+  return out.subarray(0, len);
+}
+const be16 = (v) => Buffer.from([v >> 8, v & 0xff]);
+const V1 = Buffer.from("HPKE-v1"), NONE = Buffer.alloc(0), FINAL = Buffer.from("final");
+const KEM_SUITE = Buffer.concat([Buffer.from("KEM"), be16(0x20)]);
+const HPKE_SUITE = Buffer.concat([Buffer.from("HPKE"), be16(0x20), be16(1), be16(1)]);
+const extractL = (suite, salt, label, ikm) => hmac(salt, V1, suite, Buffer.from(label), ikm);
+const expandL = (suite, prk, label, info, len) => expand(prk, Buffer.concat([be16(len), V1, suite, Buffer.from(label), info]), len);
+const OHTTP_HDR = Buffer.concat([Buffer.from([1]), be16(0x20), be16(1), be16(1)]); // key id, KEM, KDF, AEAD
+
+const vint = (v) => v < 64 ? Buffer.from([v]) : v < 16384 ? Buffer.from([0x40 | (v >> 8), v & 0xff]) : Buffer.from([0x80 | (v >>> 24), (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]);
+const lp = (b) => Buffer.concat([vint(b.length), b]);
+
+/** One request in binary HTTP (RFC 9292), known-length form. */
+function bhttp(method, path, headers, body) {
+  const fields = Buffer.concat(Object.entries(headers).flatMap(([n, v]) => [lp(Buffer.from(n.toLowerCase())), lp(Buffer.from(v))]));
+  return Buffer.concat([vint(0), lp(Buffer.from(method)), lp(Buffer.from("https")), lp(NONE), lp(Buffer.from(path)), vint(fields.length), fields, lp(body), vint(0)]);
+}
+
+/** Seals one request to the chip's key configuration as a chunked OHTTP request of one final piece. */
+function seal(config, inner) {
+  if (config[0] !== 1 || config.readUInt16BE(1) !== 0x20) throw new Error("The gateway's key is not an X25519 OHTTP key. Nothing was sent.");
+  const pkR = config.subarray(3, 35);
+  const eph = generateKeyPairSync("x25519");
+  const enc = Buffer.from(eph.publicKey.export({ format: "jwk" }).x, "base64url");
+  const dh = diffieHellman({ privateKey: eph.privateKey, publicKey: createPublicKey({ key: { kty: "OKP", crv: "X25519", x: pkR.toString("base64url") }, format: "jwk" }) });
+  const shared = expandL(KEM_SUITE, extractL(KEM_SUITE, NONE, "eae_prk", dh), "shared_secret", Buffer.concat([enc, pkR]), 32);
+  const info = Buffer.concat([Buffer.from("message/bhttp chunked request"), Buffer.from([0]), OHTTP_HDR]);
+  const context = Buffer.concat([Buffer.from([0]), extractL(HPKE_SUITE, NONE, "psk_id_hash", NONE), extractL(HPKE_SUITE, NONE, "info_hash", info)]);
+  const secret = extractL(HPKE_SUITE, shared, "secret", NONE);
+  const c = createCipheriv("aes-128-gcm", expandL(HPKE_SUITE, secret, "key", context, 16), expandL(HPKE_SUITE, secret, "base_nonce", context, 12));
+  c.setAAD(FINAL);
+  const sealed = Buffer.concat([c.update(inner), c.final(), c.getAuthTag()]);
+  const exported = expandL(HPKE_SUITE, expandL(HPKE_SUITE, secret, "exp", context, 32), "sec", Buffer.from("message/bhttp chunked response"), 16);
+  return { wire: Buffer.concat([OHTTP_HDR, enc, vint(0), sealed]), enc, exported };
+}
+
+/** Reads exact byte counts from a stream that arrives in pieces of any size. */
+class Pull {
+  constructor(stream) { this.it = stream[Symbol.asyncIterator](); this.buf = Buffer.alloc(0); }
+  async more() { const { done, value } = await this.it.next(); if (!done) this.buf = Buffer.concat([this.buf, Buffer.from(value)]); return !done; }
+  async take(n) {
+    while (this.buf.length < n) if (!(await this.more())) throw new Error("The sealed answer was cut short.");
+    const b = this.buf.subarray(0, n);
+    this.buf = this.buf.subarray(n);
+    return b;
+  }
+  async vint() { const f = (await this.take(1))[0]; let v = f & 0x3f; for (const b of await this.take((1 << (f >> 6)) - 1)) v = v * 256 + b; return v; }
+  async rest() { while (await this.more()) { /* to the end */ } return this.take(this.buf.length); }
+}
+
+/** Opens a chunked answer as it arrives: a Response whose body streams the opened pieces. The last piece is
+ *  sealed as final, so a relay that cuts the answer short cannot pass it off as whole. */
+async function openAnswer(stream, enc, exported) {
+  const src = new Pull(stream);
+  const prk = hmac(Buffer.concat([enc, await src.take(16)]), exported);
+  const key = expand(prk, Buffer.from("key"), 16), base = expand(prk, Buffer.from("nonce"), 12);
+  let counter = 0;
+  const next = async () => {
+    const len = await src.vint();
+    const final = len === 0;
+    const ct = final ? await src.rest() : await src.take(len);
+    const iv = Buffer.from(base);
+    for (let i = 11, c = counter++; c > 0; i--, c = Math.floor(c / 256)) iv[i] ^= c & 0xff;
+    const d = createDecipheriv("aes-128-gcm", key, iv);
+    d.setAAD(final ? FINAL : NONE);
+    try {
+      d.setAuthTag(ct.subarray(ct.length - 16));
+      return { data: Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]), final };
+    } catch { throw new Error("The sealed answer was changed on the way, so it was thrown away."); }
+  };
+  const head = await next();
+  if (head.final) throw new Error("The sealed answer was cut short.");
+  // The head is a known-length binary HTTP response with an empty body: framing 1, status, header fields.
+  let at = 0;
+  const rv = () => { const f = head.data[at]; let v = f & 0x3f; for (let i = 1; i < 1 << (f >> 6); i++) v = v * 256 + head.data[at + i]; at += 1 << (f >> 6); return v; };
+  const str = () => { const n = rv(); const s = head.data.toString("utf8", at, at + n); at += n; return s; };
+  if (rv() !== 1) throw new Error("The sealed answer is not an HTTP response.");
+  const status = rv(), end = rv() + at, headers = [];
+  while (at < end) headers.push([str(), str()]);
+  const body = new ReadableStream({
+    async pull(ctl) {
+      for (;;) {
+        const { data, final } = await next();
+        if (data.length) ctl.enqueue(new Uint8Array(data));
+        if (final) return ctl.close();
+        if (data.length) return;
+      }
+    },
+  });
+  return new Response(status === 204 ? null : body, { status, headers });
+}
+
+/** One request to the gateway, sealed to its chip and carried by a relay: nothing between this computer and the
+ *  chip, paranoid.red included, can read it, and the gateway sees the relay's address instead of yours. */
+async function sealedFetch(path, method, headers, body = NONE) {
+  const { key } = await gate();
+  for (const url of RELAYS.length ? RELAYS : [`${SITE}/api/ohttp`]) {
+    // A fresh seal for each try: an answer opens only under the seal it was sent with. Trying the next relay
+    // resends the same tickets, which the gateway refuses as used rather than counting twice.
+    const s = seal(key, bhttp(method, path, headers, body));
+    const r = await net(url, { method: "POST", headers: { "content-type": "message/ohttp-chunked-req", incremental: "?1" }, body: s.wire }).catch(() => null);
+    if (!r?.ok || !r.body) continue;
+    return openAnswer(r.body, s.enc, s.exported);
+  }
+  throw new Error("No relay answered. Your question was not sent.");
 }
 
 // ---- the secret and its question counter, kept only in ~/.paranoid/connector.json
@@ -490,7 +704,7 @@ async function forward(body, model) {
   const cost = await costOf(model);
   const send = async (k) => {
     sending.add(k.start);
-    try { return await net(`${SITE}/api/v1/chat/completions`, { method: "POST", body, headers: { "content-type": "application/json", authorization: `Bearer ${k.key}` } }); }
+    try { return await sealedFetch("/api/v1/chat/completions", "POST", { "content-type": "application/json", authorization: `Bearer ${k.key}` }, body); }
     finally { sending.delete(k.start); }
   };
   const t = Date.now();
@@ -614,10 +828,90 @@ function serveMcp() {
   });
 }
 
+// ---- the terminal: ask, chat and check, with the answer on stdout and everything else on stderr
+
+/** Asks once and writes the answer to `out` as it streams in. Returns the whole answer. */
+async function answer(messages, model, out) {
+  const up = await forward(Buffer.from(JSON.stringify({ model, messages, stream: true })), model);
+  if (!up.ok) {
+    const j = await up.json().catch(() => ({}));
+    throw new Error(j.error?.message ?? `The gateway answered ${up.status}.`);
+  }
+  if (!(up.headers.get("content-type") ?? "").includes("event-stream")) {
+    const text = (await up.json()).choices?.[0]?.message?.content ?? "";
+    out.write(text);
+    return text;
+  }
+  let text = "", buf = "";
+  const dec = new TextDecoder();
+  for await (const chunk of up.body) {
+    buf += dec.decode(chunk, { stream: true });
+    for (let i; (i = buf.indexOf("\n")) >= 0; buf = buf.slice(i + 1)) {
+      const line = buf.slice(0, i).trim();
+      if (!line.startsWith("data:") || line === "data: [DONE]") continue;
+      let piece = "";
+      try { piece = JSON.parse(line.slice(5)).choices?.[0]?.delta?.content ?? ""; } catch { /* a keep-alive or a partial line */ }
+      if (piece) { out.write(piece); text += piece; }
+    }
+  }
+  return text;
+}
+
+async function readStdin() {
+  if (process.stdin.isTTY) return "";
+  const parts = [];
+  for await (const c of process.stdin) parts.push(c);
+  return Buffer.concat(parts).toString("utf8").trim();
+}
+
+async function cli(cmd, args) {
+  let model;
+  const words = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-m" || args[i] === "--model") model = args[++i];
+    else words.push(args[i]);
+  }
+  if (cmd === "check") {
+    proven = null;
+    await gate();
+    const up = await sealedFetch("/api/v1/models", "GET", { accept: "application/json" });
+    const n = (await up.json()).data?.length ?? 0;
+    console.log(`A sealed request went through ${RELAYS.length ? "a relay" : "no relay"} and the chip answered: ${n} models.`);
+    return;
+  }
+  state = load();
+  if (!state) throw new Error("No membership here yet. Run node connect.mjs once and paste the connector code from the Keys tab, or buy one: PARANOID_PAYER=wallet.json node connect.mjs buy 500");
+  if (cmd === "ask") {
+    const piped = await readStdin();
+    const question = [words.join(" "), piped].filter(Boolean).join("\n\n");
+    if (!question) throw new Error('Give a question: node connect.mjs ask "your question", or pipe text in.');
+    await answer([{ role: "user", content: question }], model, process.stdout);
+    process.stdout.write("\n");
+    return;
+  }
+  // chat: one conversation, every turn asked with a fresh key, so the gateway cannot tie the turns together
+  // except by what the conversation itself says. Ctrl-D or an empty line ends it.
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const messages = [];
+  for (;;) {
+    const line = (await rl.question("\n> ").catch(() => "")).trim();
+    if (!line) break;
+    messages.push({ role: "user", content: line });
+    try { messages.push({ role: "assistant", content: await answer(messages, model, process.stdout) }); }
+    catch (e) { messages.pop(); console.error(e.message); }
+    process.stdout.write("\n");
+  }
+  rl.close();
+}
+
 let arg = process.argv[2];
 if (arg === "mcp") {
   state = load();
   serveMcp();
+} else if (arg === "ask" || arg === "chat" || arg === "check") {
+  console.log = console.error; // stdout carries the answer only, so it can be piped on
+  try { await cli(arg, process.argv.slice(3)); process.exit(0); }
+  catch (e) { console.error(e.message); process.exit(1); }
 } else {
   try {
     if (arg === "buy") {
