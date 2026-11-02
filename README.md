@@ -22,7 +22,7 @@ tool can get questions. Claude Desktop brings its own Node.js, so there is nothi
 **Claude Code.**
 
 ```bash
-claude mcp add paranoid -- npx -y github:paranoiddotred/paranoid-mcp#v1.3.0 mcp
+claude mcp add paranoid -- npx -y github:paranoiddotred/paranoid-mcp#v1.4.0 mcp
 ```
 
 Cursor and Claude Code run it straight from this repository with `npx`, pinned to the release tag so you get the
@@ -31,7 +31,7 @@ questions you already bought, run it once in a terminal and paste the connector 
 never lands in your shell history. It then serves the local endpoint until you stop it with Ctrl+C.
 
 ```bash
-npx -y github:paranoiddotred/paranoid-mcp#v1.3.0
+npx -y github:paranoiddotred/paranoid-mcp#v1.4.0
 ```
 
 You can also put the code in the client's settings as `PARANOID_CODE`, the way the Claude Desktop extension
@@ -93,7 +93,9 @@ Questions cost 0.002 USDC each, 250 at least, plus a 0.30 USDC setup fee when an
 
 ## How it stays private
 
-When you buy questions, your computer makes a secret and sends only a commitment to it, which goes into a member list on Solana. For each question, the connector proves in zero knowledge that it holds the secret of some member with questions left, and marks one numbered question as spent with a nullifier that names no member. The gateway verifies the proof and forwards the question to the model, but it never learns which member asked, two questions cannot be tied together through their proofs, and each request travels on a connection of its own. Your network address is a separate layer: [SECURITY.md](SECURITY.md#what-stays-visible) shows how to route the connector through Tor or a VPN.
+When you buy questions, your computer makes a secret and sends only a commitment to it, which goes into a member list on Solana. For each question, the connector proves in zero knowledge that it holds the secret of some member with questions left, and marks one numbered question as spent with a nullifier that names no member. The gateway verifies the proof and forwards the question to the model, but it never learns which member asked, two questions cannot be tied together through their proofs, and each request travels on a connection of its own.
+
+The gateway runs inside an Intel TDX chip. Before the first question, and every ten minutes after, the connector checks Intel's signature on that chip, a nonce it made itself, and the chip's build against the list of approved builds that PARANOID's 2-of-3 multisig keeps on Solana ([p2UnUp...Sfw8](https://solscan.io/account/p2UnUpGKaoc8dZCy6T55f2FDPiXa6DF5SENq1BfSfw8)), read from a public Solana RPC that PARANOID does not run. Then it seals every request to that chip with [Oblivious HTTP](https://www.rfc-editor.org/rfc/rfc9458) and sends it through an independent relay. Nothing on the way, paranoid.red included, can read the question or the answer, and the gateway sees the relay's address instead of yours. If a check fails, nothing is sent. `node connect.mjs check` runs the checks and one sealed request without spending a question.
 
 Spending the same numbered question twice reveals the secret. Anyone can then slash the membership and recompute every question it ever asked, so keep each membership in one place. The connector writes each number to disk before it is used and reads the public list of spent questions before every key, so this cannot happen by accident.
 
@@ -156,9 +158,19 @@ PARANOID_PAYER=wallet.json node connect.mjs buy 500
 
 Full documentation is at [paranoid.red/docs/agents](https://paranoid.red/docs/agents) and [paranoid.red/docs/connector](https://paranoid.red/docs/connector).
 
+## From the terminal
+
+```bash
+node connect.mjs ask "What does RFC 9458 change for a relay?"
+git diff | node connect.mjs ask "Review this change"
+node connect.mjs chat -m <model id>
+```
+
+The answer goes to stdout and everything else to stderr, so it can be piped on.
+
 ## Files it downloads
 
-On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. The prover is snarkjs 0.7.6 exactly as published on npm, and the circuit files are the ones published in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), so anyone can compare them. Their SHA-256 hashes are written inside `connect.mjs`, it refuses to run anything that does not match, and the prover runs in a separate JavaScript realm with no network, files or process to reach, so the proof is the only thing that leaves it. [SECURITY.md](SECURITY.md) has the details.
+On its first question the connector downloads the prover and the circuit from paranoid.red and keeps them in `~/.paranoid/zk`. With them comes Intel's quote verifier, @phala/dcap-qvl-web 0.3.3 exactly as published on npm. The prover is snarkjs 0.7.6 exactly as published on npm, and the circuit files are the ones published in [paranoiddotred/paranoid](https://github.com/paranoiddotred/paranoid), so anyone can compare them. Their SHA-256 hashes are written inside `connect.mjs`, it refuses to run anything that does not match, and the prover runs in a separate JavaScript realm with no network, files or process to reach, so the proof is the only thing that leaves it. [SECURITY.md](SECURITY.md) has the details.
 
 ## License
 

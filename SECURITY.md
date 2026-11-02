@@ -41,14 +41,24 @@ public issue. Include the steps to reproduce and the client you used.
   account it comes from must belong to the PARANOID program. A gateway that asks for anything else, or sends a
   quote that cannot be read, gets nothing signed.
 
+- Before any question leaves, the connector checks the gateway's chip: Intel's signature on its TDX quote
+  (verified with @phala/dcap-qvl-web 0.3.3, pinned like the prover), that the quote binds the sealing key to a
+  nonce made here, that the chip is not in debug mode, and that its build (compose hash, MRTD, RTMR0 to RTMR2,
+  with the boot log replayed into RTMR3) is on the list PARANOID's 2-of-3 multisig writes to the Solana record
+  `p2UnUpGKaoc8dZCy6T55f2FDPiXa6DF5SENq1BfSfw8`. That list is read from a public Solana node, never through
+  paranoid.red, and the account must belong to the SPL Record program with the multisig vault as its
+  authority. Every request is then sealed to the chip's key; an answer that was cut short or changed on the
+  way is thrown away. `test/gate-live.mjs` plays a lying site, RPC and relay against the live gateway.
+
 ## What stays visible
 
-- **Your network address.** The proofs hide which member asks, but every request still leaves from your own
-  address. To keep that apart as well, send the connector's traffic through Tor or a VPN: on Node.js 22.21, 24
-  or newer, set `HTTPS_PROXY` to the proxy (for Tor, its `HTTPTunnelPort`) and `NODE_USE_ENV_PROXY=1`. This uses
-  Node.js's own proxy support, and CI checks on every push that the requests then go through the proxy. If a
-  proxy is set but this Node.js would send requests around it, the connector refuses to start. The web
-  app does this for you with its IP shield.
+- **Your network address.** Questions and answers travel sealed through an independent Oblivious HTTP relay,
+  so the gateway sees the relay's address and the relay sees yours with nothing readable. The other requests,
+  for the model list, the list of spent questions, chain reads and the first downloads, still leave from your
+  own address; they carry no question. To keep those apart as well, send the connector's traffic through Tor or
+  a VPN: on Node.js 22.21, 24 or newer, set `HTTPS_PROXY` to the proxy (for Tor, its `HTTPTunnelPort`) and
+  `NODE_USE_ENV_PROXY=1`. If a proxy is set but this Node.js would send requests around it, the connector
+  refuses to start.
 - **Who bought.** Buying shows which wallet paid for a membership, as any payment on Solana does. It never
   shows which questions that membership asks. Pay from a wallet with no history if the purchase itself must
   stay apart from you.
