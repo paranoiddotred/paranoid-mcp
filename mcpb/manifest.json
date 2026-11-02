@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "paranoid",
   "display_name": "PARANOID",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Ask AI models in private, with a zero-knowledge proof made on your computer for every question.",
   "long_description": "PARANOID gives Claude four tools: ask, models, balance and buy. Each question goes to one of PARANOID's AI models with a fresh zero-knowledge key made on your computer, so the PARANOID gateway can check that the question was paid for without learning who asked or tying it to any other question.\n\nPaste the connector code from the Keys tab on paranoid.red to use questions you already bought, or choose a Solana wallet file holding USDC and let the buy tool get new ones with x402.\n\nThe extension runs `connect.mjs` from the paranoid-mcp repository, byte for byte the file every release lists the SHA-256 of.",
   "author": {
